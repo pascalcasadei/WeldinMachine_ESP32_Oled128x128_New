@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <AccelStepper.h>
+#include <ESP_FlexyStepper.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
 
@@ -7,7 +7,7 @@
 // DISPLAY SH1107 (I2C)
 #define I2C_SDA 21
 #define I2C_SCL 22
-#define OLED_ADDRESS 0x3C // o 0x3D
+#define OLED_ADDRESS 0x3C
 
 // STEPPER 1 (X)
 #define STEP_PIN_X 14
@@ -25,7 +25,7 @@
 #define LIMIT_Y_MIN 36
 #define LIMIT_Y_MAX 39
 
-// PULSANTI (con pull-up esterni da 10k)
+// PULSANTI
 #define BUTTON_START 12
 #define BUTTON_STOP 13
 #define BUTTON_PAUSE 5
@@ -40,12 +40,12 @@
 // =========== STATI SISTEMA ===========
 enum SystemState
 {
-  STATE_OFF,
-  STATE_HOMING,
-  STATE_READY,
-  STATE_RUNNING,
-  STATE_PAUSED,
-  STATE_EMERGENCY
+    STATE_OFF,
+    STATE_HOMING,
+    STATE_READY,
+    STATE_RUNNING,
+    STATE_PAUSED,
+    STATE_EMERGENCY
 };
 SystemState currentState = STATE_OFF;
 
@@ -56,7 +56,6 @@ unsigned long lastDebounceTimeStop = 0;
 unsigned long lastDebounceTimePause = 0;
 const unsigned long debounceDelay = 50;
 
-// CON PULL-UP ESTERNI, LO STATO PREMUTO È LOW E NON PREMUTO È HIGH
 int buttonStartState = HIGH;
 int lastButtonStartState = HIGH;
 int buttonStopState = HIGH;
@@ -88,675 +87,695 @@ const int VELOCITA_MAX = 3000;
 bool motoriAbilitati = false;
 bool releAttivo = false;
 
-// Variabili per homing e movimento
-bool homingInCorsoX = false;
-bool homingInCorsoY = false;
-long posizioneTargetY = 0;
-bool movimentoYAttivo = false;
-
 // =========== OGGETTI GLOBALI ===========
-AccelStepper stepperX(AccelStepper::DRIVER, STEP_PIN_X, DIR_PIN_X);
-AccelStepper stepperY(AccelStepper::DRIVER, STEP_PIN_Y, DIR_PIN_Y);
+ESP_FlexyStepper stepperX;
+ESP_FlexyStepper stepperY;
 Adafruit_SH1107 display = Adafruit_SH1107(128, 128, &Wire);
 
 // =========== PROTOTIPI FUNZIONI ===========
+// Gestione sistema
 void emergencyStop();
 void checkButtons();
 void aggiornaPotenziometri();
 void professionalHoming();
 void updateDisplay();
+void setupDisplay();
+
+// Gestione ciclo
 void cicloCoordinato();
+void avviaMotore1();
 void avviaMotore2();
 void controllaMotore2();
+void fermaTutto();
+
+// Gestione stati
 void pauseCycle();
 void resumeCycle();
+
+// Gestione hardware
 void attivaRele();
 void disattivaRele();
 void abilitaMotori();
 void disabilitaMotori();
-void setupDisplay();
-void gestisciHoming();
+
+// Debug e utilità
+void debugRele();
 
 // =========== SETUP DISPLAY ===========
 void setupDisplay()
 {
-  Wire.begin(I2C_SDA, I2C_SCL);
+    Wire.begin(I2C_SDA, I2C_SCL);
 
-  if (!display.begin(OLED_ADDRESS, true))
-  {
-    Serial.println("SH1107 non trovato!");
-    while (1)
-      ;
-  }
+    if (!display.begin(OLED_ADDRESS, true))
+    {
+        Serial.println("SH1107 non trovato!");
+        while (1)
+            ;
+    }
 
-  display.clearDisplay();
-  display.setTextColor(SH110X_WHITE);
-  display.setTextSize(1);
-  display.display();
+    display.clearDisplay();
+    display.setTextColor(SH110X_WHITE);
+    display.setTextSize(1);
+    display.display();
 
-  Serial.println("Display SH1107 inizializzato");
+    Serial.println("Display SH1107 inizializzato");
 }
 
 // =========== GESTIONE MOTORI ===========
 void abilitaMotori()
 {
-  if (!motoriAbilitati)
-  {
-    digitalWrite(ENABLE_PIN_X, LOW);
-    digitalWrite(ENABLE_PIN_Y, LOW);
-    motoriAbilitati = true;
-    Serial.println("Motori abilitati");
-  }
+    if (!motoriAbilitati)
+    {
+        digitalWrite(ENABLE_PIN_X, LOW);
+        digitalWrite(ENABLE_PIN_Y, LOW);
+        motoriAbilitati = true;
+        Serial.println("Motori abilitati");
+    }
 }
 
 void disabilitaMotori()
 {
-  if (motoriAbilitati)
-  {
-    digitalWrite(ENABLE_PIN_X, HIGH);
-    digitalWrite(ENABLE_PIN_Y, HIGH);
-    motoriAbilitati = false;
-    Serial.println("Motori disabilitati");
-  }
+    if (motoriAbilitati)
+    {
+        digitalWrite(ENABLE_PIN_X, HIGH);
+        digitalWrite(ENABLE_PIN_Y, HIGH);
+        motoriAbilitati = false;
+        Serial.println("Motori disabilitati");
+    }
 }
 
 // =========== GESTIONE RELE ===========
 void attivaRele()
 {
-  if (!releAttivo)
-  {
-    digitalWrite(RELE_PIN, HIGH);
-    releAttivo = true;
-    Serial.println("Rele attivato");
-  }
+    if (!releAttivo)
+    {
+        digitalWrite(RELE_PIN, HIGH);
+        releAttivo = true;
+        Serial.println("Rele attivato");
+    }
 }
 
 void disattivaRele()
 {
-  if (releAttivo)
-  {
-    digitalWrite(RELE_PIN, LOW);
-    releAttivo = false;
-    Serial.println("Rele disattivato");
-  }
+    if (releAttivo)
+    {
+        digitalWrite(RELE_PIN, LOW);
+        releAttivo = false;
+        Serial.println("Rele disattivato");
+    }
 }
 
 // =========== SETUP ===========
 void setup()
 {
-  Serial.begin(115200);
-  delay(1000);
+    Serial.begin(115200);
+    delay(1000);
 
-  // Display prima di tutto
-  setupDisplay();
+    // Display prima di tutto
+    setupDisplay();
 
-  display.setTextSize(2);
-  display.setCursor(10, 50);
-  display.print("AVVIO...");
-  display.display();
-  delay(1000);
+    display.setTextSize(2);
+    display.setCursor(10, 50);
+    display.print("AVVIO...");
+    display.display();
+    delay(1000);
 
-  // Stepper enable
-  pinMode(ENABLE_PIN_X, OUTPUT);
-  pinMode(ENABLE_PIN_Y, OUTPUT);
-  disabilitaMotori();
+    // Stepper enable
+    pinMode(ENABLE_PIN_X, OUTPUT);
+    pinMode(ENABLE_PIN_Y, OUTPUT);
+    disabilitaMotori();
 
-  // PULSANTI CON PULL-UP ESTERNI - USA INPUT SENZA PULLUP INTERNO
-  pinMode(BUTTON_START, INPUT_PULLUP);
-  pinMode(BUTTON_STOP, INPUT_PULLUP);
-  pinMode(BUTTON_PAUSE, INPUT_PULLUP);
+    // Pulsanti
+    pinMode(BUTTON_START, INPUT_PULLUP);
+    pinMode(BUTTON_STOP, INPUT_PULLUP);
+    pinMode(BUTTON_PAUSE, INPUT_PULLUP);
 
-  // Finecorsa
-  pinMode(LIMIT_X_MIN, INPUT);
-  pinMode(LIMIT_X_MAX, INPUT);
-  pinMode(LIMIT_Y_MIN, INPUT);
-  pinMode(LIMIT_Y_MAX, INPUT);
+    // Finecorsa
+    pinMode(LIMIT_X_MIN, INPUT);
+    pinMode(LIMIT_X_MAX, INPUT);
+    pinMode(LIMIT_Y_MIN, INPUT);
+    pinMode(LIMIT_Y_MAX, INPUT);
 
-  // Relè
-  pinMode(RELE_PIN, OUTPUT);
-  disattivaRele();
+    // Relè
+    pinMode(RELE_PIN, OUTPUT);
+    disattivaRele();
 
-  // AccelStepper configuration
-  stepperX.setMaxSpeed(3000.0);
-  stepperX.setAcceleration(2000.0);
-  stepperX.setSpeed(velocitaMotore1);
-  
-  stepperY.setMaxSpeed(3000.0);
-  stepperY.setAcceleration(2000.0);
-  stepperY.setSpeed(velocitaMotore2);
+    // Stepper configuration
+    stepperX.connectToPins(STEP_PIN_X, DIR_PIN_X);
+    stepperY.connectToPins(STEP_PIN_Y, DIR_PIN_Y);
+    stepperX.setStepsPerRevolution(1600);
+    stepperY.setStepsPerRevolution(1600);
+    stepperX.setSpeedInStepsPerSecond(velocitaMotore1);
+    stepperY.setSpeedInStepsPerSecond(velocitaMotore2);
+    stepperX.setAccelerationInStepsPerSecondPerSecond(2000);
+    stepperY.setAccelerationInStepsPerSecondPerSecond(2000);
 
-  currentState = STATE_OFF;
+    currentState = STATE_OFF;
 
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setCursor(20, 50);
-  display.print("PRONTO");
-  display.display();
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setCursor(20, 50);
+    display.print("PRONTO");
+    display.display();
 
-  Serial.println("Sistema pronto - Display SH1107 attivo");
-  Serial.println("Configurazione: Pulsanti con pull-up esterni da 10k");
+    Serial.println("Sistema pronto - Display SH1107 attivo");
 }
 
 // =========== EMERGENCY STOP ===========
 void emergencyStop()
 {
-  stepperX.stop();
-  stepperY.stop();
-  disabilitaMotori();
-  disattivaRele();
-  cicloAttivo = false;
-  homingInCorsoX = false;
-  homingInCorsoY = false;
-  movimentoYAttivo = false;
-  currentState = STATE_EMERGENCY;
-  Serial.println("FERMO EMERGENZA");
+    stepperX.setTargetPositionToStop();
+    stepperY.setTargetPositionToStop();
+    disabilitaMotori();
+    disattivaRele();
+    cicloAttivo = false;
+    currentState = STATE_EMERGENCY;
+    Serial.println("FERMO EMERGENZA");
 }
 
-// =========== GESTIONE PULSANTI (CON PULL-UP ESTERNI) ===========
+// =========== GESTIONE PULSANTI ===========
 void checkButtons()
 {
-  // LEGGI STATO PULSANTI - CON PULL-UP ESTERNI:
-  // LOW = PREMUTO, HIGH = NON PREMUTO
-  int currentStart = digitalRead(BUTTON_START);
-  int currentStop = digitalRead(BUTTON_STOP);
-  int currentPause = digitalRead(BUTTON_PAUSE);
+    int currentStart = digitalRead(BUTTON_START);
+    int currentStop = digitalRead(BUTTON_STOP);
+    int currentPause = digitalRead(BUTTON_PAUSE);
 
-  startPressed = false;
-  stopPressed = false;
-  pausePressed = false;
+    startPressed = false;
+    stopPressed = false;
+    pausePressed = false;
 
-  // DEBOUNCING START
-  if (currentStart != lastButtonStartState)
-  {
-    lastDebounceTimeStart = millis();
-  }
-  if ((millis() - lastDebounceTimeStart) > debounceDelay)
-  {
-    if (currentStart != buttonStartState)
+    // DEBOUNCING START
+    if (currentStart != lastButtonStartState)
     {
-      buttonStartState = currentStart;
-      // CON PULL-UP ESTERNI: LOW = PREMUTO
-      if (buttonStartState == LOW)
-        startPressed = true;
+        lastDebounceTimeStart = millis();
     }
-  }
-  lastButtonStartState = currentStart;
+    if ((millis() - lastDebounceTimeStart) > debounceDelay)
+    {
+        if (currentStart != buttonStartState)
+        {
+            buttonStartState = currentStart;
+            if (buttonStartState == LOW)
+                startPressed = true;
+        }
+    }
+    lastButtonStartState = currentStart;
 
-  // DEBOUNCING STOP
-  if (currentStop != lastButtonStopState)
-  {
-    lastDebounceTimeStop = millis();
-  }
-  if ((millis() - lastDebounceTimeStop) > debounceDelay)
-  {
-    if (currentStop != buttonStopState)
+    // DEBOUNCING STOP
+    if (currentStop != lastButtonStopState)
     {
-      buttonStopState = currentStop;
-      // CON PULL-UP ESTERNI: LOW = PREMUTO
-      if (buttonStopState == LOW)
-        stopPressed = true;
+        lastDebounceTimeStop = millis();
     }
-  }
-  lastButtonStopState = currentStop;
+    if ((millis() - lastDebounceTimeStop) > debounceDelay)
+    {
+        if (currentStop != buttonStopState)
+        {
+            buttonStopState = currentStop;
+            if (buttonStopState == LOW)
+                stopPressed = true;
+        }
+    }
+    lastButtonStopState = currentStop;
 
-  // DEBOUNCING PAUSE
-  if (currentPause != lastButtonPauseState)
-  {
-    lastDebounceTimePause = millis();
-  }
-  if ((millis() - lastDebounceTimePause) > debounceDelay)
-  {
-    if (currentPause != buttonPauseState)
+    // DEBOUNCING PAUSE
+    if (currentPause != lastButtonPauseState)
     {
-      buttonPauseState = currentPause;
-      // CON PULL-UP ESTERNI: LOW = PREMUTO
-      if (buttonPauseState == LOW)
-        pausePressed = true;
+        lastDebounceTimePause = millis();
     }
-  }
-  lastButtonPauseState = currentPause;
+    if ((millis() - lastDebounceTimePause) > debounceDelay)
+    {
+        if (currentPause != buttonPauseState)
+        {
+            buttonPauseState = currentPause;
+            if (buttonPauseState == LOW)
+                pausePressed = true;
+        }
+    }
+    lastButtonPauseState = currentPause;
 
-  // DEBUG PULSANTI (opzionale)
-  static unsigned long lastDebugButtons = 0;
-  if (millis() - lastDebugButtons > 1000)
-  {
-    Serial.printf("Pulsanti - START:%d STOP:%d PAUSE:%d\n", currentStart, currentStop, currentPause);
-    lastDebugButtons = millis();
-  }
+    if (stopPressed)
+    {
+        emergencyStop();
+        return;
+    }
 
-  if (stopPressed)
-  {
-    emergencyStop();
-    return;
-  }
-
-  switch (currentState)
-  {
-  case STATE_OFF:
-    if (startPressed)
+    switch (currentState)
     {
-      currentState = STATE_HOMING;
-      abilitaMotori();
-      Serial.println("Pulsante START premuto - Inizio homing");
+    case STATE_OFF:
+        if (startPressed)
+        {
+            currentState = STATE_HOMING;
+            abilitaMotori();
+        }
+        break;
+    case STATE_READY:
+        if (startPressed)
+        {
+            currentState = STATE_RUNNING;
+            abilitaMotori();
+        }
+        break;
+    case STATE_PAUSED:
+        if (startPressed)
+        {
+            resumeCycle();
+            abilitaMotori();
+        }
+        break;
+    case STATE_RUNNING:
+        if (pausePressed)
+        {
+            pauseCycle();
+            disabilitaMotori();
+        }
+        break;
+    case STATE_EMERGENCY:
+        if (startPressed)
+        {
+            currentState = STATE_OFF;
+            disabilitaMotori();
+        }
+        break;
     }
-    break;
-  case STATE_READY:
-    if (startPressed)
-    {
-      currentState = STATE_RUNNING;
-      abilitaMotori();
-      Serial.println("Pulsante START premuto - Inizio ciclo");
-    }
-    break;
-  case STATE_PAUSED:
-    if (startPressed)
-    {
-      resumeCycle();
-      abilitaMotori();
-      Serial.println("Pulsante START premuto - Ripresa ciclo");
-    }
-    break;
-  case STATE_RUNNING:
-    if (pausePressed)
-    {
-      pauseCycle();
-      disabilitaMotori();
-      Serial.println("Pulsante PAUSE premuto - Pausa ciclo");
-    }
-    break;
-  case STATE_EMERGENCY:
-    if (startPressed)
-    {
-      currentState = STATE_OFF;
-      disabilitaMotori();
-      Serial.println("Pulsante START premuto - Reset da emergenza");
-    }
-    break;
-  }
 }
 
 // =========== GESTIONE POTENZIOMETRI ===========
 void aggiornaPotenziometri()
 {
-  if (millis() - ultimoAggiornamentoPot > INTERVALLO_POT)
-  {
-    int letturaPot1 = analogRead(POTENZIOMETRO_MOTORE1);
-    int letturaPot2 = analogRead(POTENZIOMETRO_MOTORE2);
-
-    if (abs(letturaPot1 - ultimaLetturaPot1) > 50)
+    if (millis() - ultimoAggiornamentoPot > INTERVALLO_POT)
     {
-      velocitaMotore1 = map(letturaPot1, 0, 4095, VELOCITA_MIN, VELOCITA_MAX);
-      ultimaLetturaPot1 = letturaPot1;
-      if (currentState == STATE_READY || currentState == STATE_RUNNING)
-      {
-        stepperX.setMaxSpeed(velocitaMotore1);
-        if (!stepperX.isRunning()) {
-          stepperX.setSpeed(velocitaMotore1);
-        }
-      }
-    }
+        int letturaPot1 = analogRead(POTENZIOMETRO_MOTORE1);
+        int letturaPot2 = analogRead(POTENZIOMETRO_MOTORE2);
 
-    if (abs(letturaPot2 - ultimaLetturaPot2) > 50)
-    {
-      velocitaMotore2 = map(letturaPot2, 0, 4095, VELOCITA_MIN, VELOCITA_MAX);
-      ultimaLetturaPot2 = letturaPot2;
-      if (currentState == STATE_READY || currentState == STATE_RUNNING)
-      {
-        stepperY.setMaxSpeed(velocitaMotore2);
-        if (!stepperY.isRunning()) {
-          stepperY.setSpeed(velocitaMotore2);
+        if (abs(letturaPot1 - ultimaLetturaPot1) > 50)
+        {
+            velocitaMotore1 = map(letturaPot1, 0, 4095, VELOCITA_MIN, VELOCITA_MAX);
+            ultimaLetturaPot1 = letturaPot1;
+            if (currentState == STATE_READY || currentState == STATE_RUNNING)
+            {
+                stepperX.setSpeedInStepsPerSecond(velocitaMotore1);
+            }
         }
-      }
-    }
 
-    ultimoAggiornamentoPot = millis();
-  }
+        if (abs(letturaPot2 - ultimaLetturaPot2) > 50)
+        {
+            velocitaMotore2 = map(letturaPot2, 0, 4095, VELOCITA_MIN, VELOCITA_MAX);
+            ultimaLetturaPot2 = letturaPot2;
+            if (currentState == STATE_READY || currentState == STATE_RUNNING)
+            {
+                stepperY.setSpeedInStepsPerSecond(velocitaMotore2);
+            }
+        }
+
+        ultimoAggiornamentoPot = millis();
+    }
 }
 
 // =========== HOMING INTELLIGENTE ===========
-void gestisciHoming()
+void professionalHoming()
 {
-  static unsigned long homingStartTime = 0;
-  static bool homingXCompletato = false;
-  static bool homingYCompletato = false;
+    Serial.println("=== HOMING INTELLIGENTE ===");
 
-  if (homingStartTime == 0) {
-    homingStartTime = millis();
-    homingXCompletato = false;
-    homingYCompletato = false;
-    
     display.clearDisplay();
     display.setTextSize(2);
     display.setCursor(10, 50);
     display.print("HOMING...");
     display.display();
 
-    Serial.println("=== HOMING INTELLIGENTE ===");
-  }
+    auto safeAxisHoming = [](ESP_FlexyStepper &stepper, int pinMin, int pinMax, const char *axisName) -> bool
+    {
+        Serial.print("Homing asse ");
+        Serial.println(axisName);
 
-  // Homing Asse X
-  if (!homingXCompletato) {
-    if (!homingInCorsoX) {
-      // Se già sul finecorsa MIN, si allontana
-      if (digitalRead(LIMIT_X_MIN) == LOW) {
-        Serial.println("X già su MIN - mi allontano");
-        stepperX.moveTo(stepperX.currentPosition() + 10000);
-        homingInCorsoX = true;
-      } else {
-        // Cerca il finecorsa MIN
-        stepperX.moveTo(-1000000);
-        homingInCorsoX = true;
-      }
-    } else {
-      // Controlla se ha raggiunto il finecorsa
-      if (digitalRead(LIMIT_X_MIN) == LOW) {
-        stepperX.stop();
-        stepperX.setCurrentPosition(0);
-        homingInCorsoX = false;
-        homingXCompletato = true;
-        Serial.println("Homing X completato");
-        
-        // Muove leggermente via dal finecorsa
-        stepperX.moveTo(1000);
-      }
-    }
-  }
+        if (digitalRead(pinMin) == LOW)
+        {
+            Serial.println("Già sul finecorsa - mi allontano");
+            stepper.setSpeedInStepsPerSecond(150);
+            stepper.moveToHomeInSteps(1, 150, 5000, pinMax);
 
-  // Homing Asse Y (solo dopo che X è completato)
-  if (homingXCompletato && !homingYCompletato) {
-    if (!homingInCorsoY) {
-      // Se già sul finecorsa MIN, si allontana
-      if (digitalRead(LIMIT_Y_MIN) == LOW) {
-        Serial.println("Y già su MIN - mi allontano");
-        stepperY.moveTo(stepperY.currentPosition() + 10000);
-        homingInCorsoY = true;
-      } else {
-        // Cerca il finecorsa MIN
-        stepperY.moveTo(-1000000);
-        homingInCorsoY = true;
-      }
-    } else {
-      // Controlla se ha raggiunto il finecorsa
-      if (digitalRead(LIMIT_Y_MIN) == LOW) {
-        stepperY.stop();
-        stepperY.setCurrentPosition(0);
-        homingInCorsoY = false;
-        homingYCompletato = true;
-        Serial.println("Homing Y completato");
-        
-        // Muove leggermente via dal finecorsa
-        stepperY.moveTo(1000);
-      }
-    }
-  }
+            unsigned long moveStart = millis();
+            while (!stepper.motionComplete())
+            {
+                stepper.processMovement();
+                checkButtons();
+                if (stopPressed)
+                {
+                    emergencyStop();
+                    return false;
+                }
+                if (millis() - moveStart > 10000)
+                    return false;
+                delay(10);
+            }
+            delay(500);
+        }
 
-  // Controlla timeout
-  if (millis() - homingStartTime > 30000) {
-    emergencyStop();
-    Serial.println("Homing timeout");
-    return;
-  }
+        stepper.setSpeedInStepsPerSecond(200);
+        stepper.moveToHomeInSteps(-1, 200, 20000, pinMin);
 
-  // Se entrambi completati
-  if (homingXCompletato && homingYCompletato) {
-    // Attende che entrambi i motori completino il movimento di allontanamento
-    if (stepperX.distanceToGo() == 0 && stepperY.distanceToGo() == 0) {
-      homingStartTime = 0;
-      currentState = STATE_READY;
-      Serial.println("Homing completato!");
-    }
-  }
+        unsigned long startTime = millis();
+        while (!stepper.motionComplete())
+        {
+            stepper.processMovement();
+            checkButtons();
+            if (stopPressed)
+            {
+                emergencyStop();
+                return false;
+            }
+            if (millis() - startTime > 20000)
+                return false;
+            delay(10);
+        }
+
+        stepper.setCurrentPositionInSteps(0);
+        return true;
+    };
+
+    if (!safeAxisHoming(stepperX, LIMIT_X_MIN, LIMIT_X_MAX, "X"))
+        return;
+    if (!safeAxisHoming(stepperY, LIMIT_Y_MIN, LIMIT_Y_MAX, "Y"))
+        return;
+
+    Serial.println("Homing completato!");
 }
 
-// =========== CICLO COORDINATO ===========
+// =========== CICLO COORDINATO CORRETTO ===========
 void cicloCoordinato()
 {
-  if (!cicloAttivo)
-  {
-    // INIZIO CICLO
-    cicloAttivo = true;
-    motore1Completato = false;
-    motore2Completato = false;
-    tempoInizioCiclo = millis();
+    if (!cicloAttivo)
+    {
+        cicloAttivo = true;
+        motore1Completato = false;
+        motore2Completato = false;
+        tempoInizioCiclo = millis();
+        abilitaMotori();
+        attivaRele();
+        Serial.println("=== INIZIO CICLO COORDINATO ===");
 
-    abilitaMotori();
-    attivaRele();
+        // ✅ AVVIA ENTRAMBI I MOTORI
+        avviaMotore1();
+        avviaMotore2();
+        return;
+    }
 
-    Serial.println("=== INIZIO CICLO ===");
+    // ✅ CONTROLLO FINE CICLO: quando M1 torna al MIN, ferma TUTTO
+    if (motore1Completato && digitalRead(LIMIT_X_MIN) == LOW)
+    {
+        Serial.println("🎯 CICLO COMPLETATO - Fermo TUTTO");
+        fermaTutto();
+        return;
+    }
 
-    // MOTORE 1: Va verso MAX
-    stepperX.setMaxSpeed(velocitaMotore1);
-    stepperX.moveTo(1000000); // Grande numero per raggiungere il finecorsa
+    // ✅ CONTROLLO: quando M1 raggiunge MAX, inizia ritorno rapido e FERMA MOTORE 2 + RELE
+    if (!motore1Completato && digitalRead(LIMIT_X_MAX) == LOW)
+    {
+        Serial.println("Motore 1 raggiunto finecorsa MAX - ritorno rapido");
 
-    // MOTORE 2: Inizia oscillazione
-    avviaMotore2();
+        // ✅ FERMA MOTORE 2 (torcia saldatrice) E SPEGNI RELE
+        stepperY.setTargetPositionToStop();
+        disattivaRele(); // 🔌 RELE SPENTO
+        motore2Completato = true;
 
-    return;
-  }
+        // ✅ AVVIA RITORNO RAPIDO MOTORE 1
+        stepperX.setSpeedInStepsPerSecond(velocitaMotore1 * 2);
+        stepperX.setTargetPositionInSteps(-50000);
+        motore1Completato = true;
 
-  // CONTROLLO SEMPLICE: se motore 1 è sul MIN, ciclo finito
-  if (digitalRead(LIMIT_X_MIN) == LOW && motore1Completato)
-  {
-    // CICLO COMPLETATO
-    cicloAttivo = false;
-    motore2Completato = true;
-    currentState = STATE_READY;
+        Serial.println("🔌 Motore 2 fermato e Rele spento durante ritorno rapido");
+    }
 
-    stepperX.stop();
-    stepperY.stop();
+    // ✅ CONTROLLO MOTORE 2: SOLO durante l'andata (prima del ritorno rapido)
+    if (!motore2Completato && !motore1Completato)
+    {
+        controllaMotore2();
+    }
+
+    // CONTROLLO DI SICUREZZA: timeout
+    if (millis() - tempoInizioCiclo > 120000)
+    {
+        Serial.println("⏰ TIMEOUT CICLO - Fermo emergenza");
+        emergencyStop();
+    }
+}
+
+// =========== FUNZIONI AUSILIARIE ===========
+void avviaMotore1()
+{
+    stepperX.setSpeedInStepsPerSecond(velocitaMotore1);
+    stepperX.setTargetPositionInSteps(50000);
+    Serial.println("Motore 1 avviato verso MAX");
+}
+
+void avviaMotore2()
+{
+    stepperY.setSpeedInStepsPerSecond(velocitaMotore2);
+    stepperY.setTargetPositionInSteps(50000);
+    Serial.println("Motore 2 avviato (torcia saldatrice)");
+}
+
+void fermaTutto()
+{
+    stepperX.setTargetPositionToStop();
+    stepperY.setTargetPositionToStop();
     disabilitaMotori();
     disattivaRele();
 
-    // RESETTA POSIZIONE
-    stepperX.setCurrentPosition(0);
-    stepperY.setCurrentPosition(0);
+    motore2Completato = true;
+    cicloAttivo = false;
+    currentState = STATE_READY;
 
     Serial.println("=== CICLO COMPLETATO ===");
-    return;
-  }
-
-  // CONTROLLO MOTORE 1: se raggiunge MAX, torna al MIN
-  if (digitalRead(LIMIT_X_MAX) == LOW && !motore1Completato)
-  {
-    Serial.println("X ha raggiunto MAX - torna al MIN");
-    stepperX.setMaxSpeed(velocitaMotore1 * 2);
-    stepperX.moveTo(-1000000); // Grande numero negativo per raggiungere il finecorsa MIN
-    motore1Completato = true;
-  }
-
-  // CONTROLLO MOTORE 2: oscillazione continua
-  if (!motore2Completato)
-  {
-    controllaMotore2();
-  }
 }
 
-// =========== GESTIONE MOTORE 2 ===========
-void avviaMotore2()
-{
-  stepperY.setMaxSpeed(velocitaMotore2);
-  movimentoYAttivo = true;
-  // Movimento iniziale verso MAX
-  stepperY.moveTo(50000);
-  Serial.println("Motore 2 iniziato avanti-indietro");
-}
-
+// =========== GESTIONE MOTORE 2 (TORCIA SALDATRICE) ===========
 void controllaMotore2()
 {
-  if (!movimentoYAttivo) return;
+    // ✅ CONTROLLO DI SICUREZZA: se il motore 2 deve essere fermo, esci
+    if (motore2Completato || motore1Completato)
+    {
+        return;
+    }
 
-  // Oscillazione semplice tra MIN e MAX
-  if (digitalRead(LIMIT_Y_MAX) == LOW && stepperY.distanceToGo() > 0)
-  {
-    // Se sono su MAX, vado verso MIN
-    stepperY.moveTo(-50000);
-  }
-  else if (digitalRead(LIMIT_Y_MIN) == LOW && stepperY.distanceToGo() < 0)
-  {
-    // Se sono su MIN, vado verso MAX
-    stepperY.moveTo(50000);
-  }
+    // ✅ ANTI-RIMBALZO: evita cambi troppo frequenti
+    static unsigned long ultimoCambio = 0;
+    if (millis() - ultimoCambio < 500)
+        return;
+
+    // ✅ OSCILLAZIONE TRA I FINECORSA
+    if (digitalRead(LIMIT_Y_MAX) == LOW)
+    {
+        Serial.println("🔁 M2: MAX → MIN (oscillazione)");
+        stepperY.setTargetPositionInSteps(-50000);
+        ultimoCambio = millis();
+    }
+    else if (digitalRead(LIMIT_Y_MIN) == LOW)
+    {
+        Serial.println("🔁 M2: MIN → MAX (oscillazione)");
+        stepperY.setTargetPositionInSteps(50000);
+        ultimoCambio = millis();
+    }
 }
 
-// =========== PAUSA E RIPRESA ===========
 void pauseCycle()
 {
-    // 1. Ferma subito il Motore Y
-    stepperY.stop();
-    movimentoYAttivo = false;
+    Serial.println("⏸️ PAUSA: Fermo motori e retrocedo X di 200 passi");
     
-    // 2. Imposta la retrocessione del Motore X di 3 giri (600 passi)
-    stepperX.setMaxSpeed(1000); // Velocità moderata per la retrocessione
-    stepperX.move(stepperX.currentPosition() - 600); // 3 giri indietro (200 * 3)
-
+    // 1. Ferma immediatamente entrambi i motori
+    stepperX.setTargetPositionToStop();
+    stepperY.setTargetPositionToStop();
+    
+    // 2. Retrocede il motore X di 200 passi (un giro)
+    stepperX.setSpeedInStepsPerSecond(800); // Velocità moderata per la retrocessione
+    stepperX.moveRelativeInSteps(-200); // Retrocede di 200 passi
+    
+    // 3. Disabilita motori e relè
+    disabilitaMotori();
     disattivaRele();
-    currentState = STATE_PAUSED; 
     
-    Serial.println("Ciclo in pausa: X retrocede di 600 passi.");
+    currentState = STATE_PAUSED;
+    Serial.println("✅ PAUSA: Motore X in retrocessione di 200 passi");
 }
 
-void resumeCycle()
+
+    void resumeCycle()
 {
+    Serial.println("▶️ RIPRESA: Riavvio ciclo dalla posizione corrente");
+    
     currentState = STATE_RUNNING;
-    movimentoYAttivo = true;
-    // Ripristina il movimento oscillatorio del motore Y
-    stepperY.moveTo(50000);
+    abilitaMotori();
     attivaRele();
-    Serial.println("Ciclo ripreso");
+    
+    // Ripristina il movimento di entrambi i motori dalla posizione corrente
+    if (!motore1Completato) {
+        // Continua verso il finecorsa MAX
+        stepperX.setSpeedInStepsPerSecond(velocitaMotore1);
+        stepperX.setTargetPositionInSteps(50000);
+    }
+    
+    if (!motore2Completato) {
+        // Riprende l'oscillazione
+        stepperY.setSpeedInStepsPerSecond(velocitaMotore2);
+        stepperY.setTargetPositionInSteps(50000);
+    }
+    
+    Serial.println("✅ RIPRESA: Ciclo riavviato");
 }
 
-// =========== AGGIORNA DISPLAY ===========
+
+// =========== AGGIORNA DISPLAY SENZA X e Y ===========
 void updateDisplay()
 {
-  display.clearDisplay();
+    display.clearDisplay();
 
-  // Solo informazioni ESSENZIALI
-  display.setTextSize(2);
-  display.setCursor(0, 0);
+    // Riga 1: Stato sistema (testo grande)
+    display.setTextSize(2);
+    display.setCursor(0, 0);
 
-  // STATO PRINCIPALE
-  switch (currentState)
-  {
-  case STATE_OFF:
-    display.print("OFF");
-    break;
-  case STATE_HOMING:
-    display.print("HOMING");
-    break;
-  case STATE_READY:
-    display.print("PRONTO");
-    break;
-  case STATE_RUNNING:
-    display.print("IN CORSO");
-    break;
-  case STATE_PAUSED:
-    display.print("PAUSA");
-    break;
-  case STATE_EMERGENCY:
-    display.print("STOP");
-    break;
-  }
+    switch (currentState)
+    {
+    case STATE_OFF:
+        display.print("OFF");
+        break;
+    case STATE_HOMING:
+        display.print("HOMING");
+        break;
+    case STATE_READY:
+        display.print("PRONTO");
+        break;
+    case STATE_RUNNING:
+        display.print("ATTIVO");
+        break;
+    case STATE_PAUSED:
+        display.print("PAUSA");
+        break;
+    case STATE_EMERGENCY:
+        display.print("STOP");
+        break;
+    }
 
-  // INFORMAZIONI IMPORTANTI
-  display.setTextSize(1);
-
-  // Righe 2-3: STATO MOTORI
-  display.setCursor(0, 20);
-  if (currentState == STATE_RUNNING)
-  {
+    // Riga 2: Stato motori
+    display.setTextSize(1);
+    display.setCursor(0, 20);
     display.print("M1:");
-    display.print(digitalRead(LIMIT_X_MAX) == LOW ? "MAX" : digitalRead(LIMIT_X_MIN) == LOW ? "MIN"
-                                                                                            : "IN MOV");
+    display.print(motore1Completato ? "RITORNO" : "ANDATA");
+
+    // Riga 3: Motore 2
     display.setCursor(0, 30);
-    display.print("M2:OSCILLA");
-  }
-  else
-  {
-    display.print("Premi START");
-  }
+    display.print("M2:AVANTI-INDIETRO");
 
-  // Righe 4-5: POSIZIONI
-  display.setCursor(0, 45);
-  display.print("X:");
-  display.print(stepperX.currentPosition());
-  display.setCursor(70, 45);
-  display.print("Y:");
-  display.print(stepperY.currentPosition());
+    // Riga 4: Rele e motori (IMPORTANTE)
+    display.setCursor(0, 40);
+    display.print("RELE:");
+    display.print(releAttivo ? "ON " : "OFF");
+    display.setCursor(70, 40);
+    display.print("MOT:");
+    display.print(motoriAbilitati ? "ON" : "OFF");
 
-  // Righe 6-7: VELOCITA'
-  display.setCursor(0, 55);
-  display.print("V1:");
-  display.print(velocitaMotore1);
-  display.setCursor(70, 55);
-  display.print("V2:");
-  display.print(velocitaMotore2);
+    // Riga 5: Velocità
+    display.setCursor(0, 55);
+    display.print("V1:");
+    display.print(velocitaMotore1);
+    display.print("sps");
 
-  // Righe 8-9: STATI
-  display.setCursor(0, 70);
-  display.print("RELE:");
-  display.print(releAttivo ? "ON " : "OFF");
-  display.setCursor(70, 70);
-  display.print("MOT:");
-  display.print(motoriAbilitati ? "ON" : "OFF");
+    display.setCursor(65, 55);
+    display.print("V2:");
+    display.print(velocitaMotore2);
+    display.print("sps");
 
-  // Righe 10: FINE CORSA ATTIVI
-  display.setCursor(0, 85);
-  display.print("FSX:");
-  display.print(digitalRead(LIMIT_X_MIN) == LOW ? "MIN" : digitalRead(LIMIT_X_MAX) == LOW ? "MAX"
-                                                                                          : "NO");
-  display.setCursor(70, 85);
-  display.print("FSY:");
-  display.print(digitalRead(LIMIT_Y_MIN) == LOW ? "MIN" : digitalRead(LIMIT_Y_MAX) == LOW ? "MAX"
-                                                                                          : "NO");
+    // Riga 6: Finecorsa X
+    display.setCursor(0, 70);
+    display.print("X_MIN:");
+    display.print(digitalRead(LIMIT_X_MIN) == LOW ? "ATT" : "NO");
+    display.setCursor(70, 70);
+    display.print("X_MAX:");
+    display.print(digitalRead(LIMIT_X_MAX) == LOW ? "ATT" : "NO");
 
-  display.display();
+    // Riga 7: Finecorsa Y
+    display.setCursor(0, 85);
+    display.print("Y_MIN:");
+    display.print(digitalRead(LIMIT_Y_MIN) == LOW ? "ATT" : "NO");
+    display.setCursor(70, 85);
+    display.print("Y_MAX:");
+    display.print(digitalRead(LIMIT_Y_MAX) == LOW ? "ATT" : "NO");
+
+    // Riga 8: Comandi
+    display.setCursor(0, 100);
+    display.print("START:");
+    switch (currentState)
+    {
+    case STATE_OFF:
+        display.print("Homing");
+        break;
+    case STATE_READY:
+        display.print("Avvia");
+        break;
+    case STATE_PAUSED:
+        display.print("Riprendi");
+        break;
+    case STATE_EMERGENCY:
+        display.print("Reset");
+        break;
+    default:
+        display.print("---");
+        break;
+    }
+
+    // Riga 9: Stato ciclo
+    display.setCursor(0, 115);
+    display.print("CICLO:");
+    display.print(cicloAttivo ? "ATTIVO" : "FERMO");
+
+    display.display();
+}
+
+// =========== DEBUG RELE ===========
+void debugRele()
+{
+    static bool ultimoStatoRele = false;
+    if (releAttivo != ultimoStatoRele)
+    {
+        Serial.printf("🔌 RELE: %s -> %s\n",
+                      ultimoStatoRele ? "ON" : "OFF",
+                      releAttivo ? "ON" : "OFF");
+        ultimoStatoRele = releAttivo;
+    }
 }
 
 // =========== LOOP PRINCIPALE ===========
 void loop()
 {
-  checkButtons();
-  aggiornaPotenziometri();
+    checkButtons();
+    aggiornaPotenziometri();
+    debugRele();
 
-  // DEBUG OGNI 2 SECONDI
-  static unsigned long lastDebug = 0;
-  if (millis() - lastDebug > 2000)
-  {
-    Serial.println("=== DEBUG ===");
-    Serial.printf("Stato: %d, CicloAttivo: %d\n", currentState, cicloAttivo);
-    Serial.printf("M1Completato: %d, M2Completato: %d\n", motore1Completato, motore2Completato);
-    Serial.printf("Finecorsa X_MIN: %d, X_MAX: %d\n", digitalRead(LIMIT_X_MIN), digitalRead(LIMIT_X_MAX));
-    Serial.printf("Finecorsa Y_MIN: %d, Y_MAX: %d\n", digitalRead(LIMIT_Y_MIN), digitalRead(LIMIT_Y_MAX));
-    Serial.printf("Posizione X: %d, Y: %d\n", stepperX.currentPosition(), stepperY.currentPosition());
-    Serial.printf("DistanceToGo X: %d, Y: %d\n", stepperX.distanceToGo(), stepperY.distanceToGo());
-    Serial.println("=============");
-    lastDebug = millis();
-  }
+    switch (currentState)
+    {
+    case STATE_HOMING:
+        professionalHoming();
+        if (currentState != STATE_EMERGENCY)
+        {
+            currentState = STATE_READY;
+        }
+        break;
 
-  switch (currentState)
-  {
-  case STATE_HOMING:
-    gestisciHoming();
-    break;
+    case STATE_RUNNING:
+        cicloCoordinato();
+        stepperX.processMovement();
+        stepperY.processMovement();
+        break;
 
-  case STATE_RUNNING:
-    cicloCoordinato();
-    stepperX.run();
-    stepperY.run();
-    break;
+    case STATE_PAUSED:
+        // ✅ Durante la pausa, permette al motore X di completare la retrocessione
+        stepperX.processMovement();
+        stepperY.processMovement();
+        break;
 
-  case STATE_PAUSED:
-    // Durante la pausa, permette al motore X di completare la retrocessione
-    stepperX.run();
-    stepperY.run(); // Y dovrebbe essere fermo ma chiamiamo run() per sicurezza
-    break;
+    default:
+        stepperX.processMovement();
+        stepperY.processMovement();
+        break;
+    }
 
-  default:
-    stepperX.run();
-    stepperY.run();
-    break;
-  }
-
-  updateDisplay();
-  delay(10); // Ridotto il delay per migliore responsività
+    updateDisplay();
+    delay(50);
 }
