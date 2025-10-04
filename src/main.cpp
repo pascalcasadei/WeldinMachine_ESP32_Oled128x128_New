@@ -202,15 +202,15 @@ void setup()
   disabilitaMotori();
 
   // PULSANTI CON PULL-UP ESTERNI - USA INPUT SENZA PULLUP INTERNO
-  pinMode(BUTTON_START, INPUT);
-  pinMode(BUTTON_STOP, INPUT);
-  pinMode(BUTTON_PAUSE, INPUT);
+  pinMode(BUTTON_START, INPUT_PULLUP);
+  pinMode(BUTTON_STOP, INPUT_PULLUP);
+  pinMode(BUTTON_PAUSE, INPUT_PULLUP);
 
   // Finecorsa
-  pinMode(LIMIT_X_MIN, INPUT_PULLUP);
-  pinMode(LIMIT_X_MAX, INPUT_PULLUP);
-  pinMode(LIMIT_Y_MIN, INPUT_PULLUP);
-  pinMode(LIMIT_Y_MAX, INPUT_PULLUP);
+  pinMode(LIMIT_X_MIN, INPUT);
+  pinMode(LIMIT_X_MAX, INPUT);
+  pinMode(LIMIT_Y_MIN, INPUT);
+  pinMode(LIMIT_Y_MAX, INPUT);
 
   // Relè
   pinMode(RELE_PIN, OUTPUT);
